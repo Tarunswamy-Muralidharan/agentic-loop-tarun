@@ -3,9 +3,10 @@
 model:
   provider: groq
   base_url: https://api.groq.com/openai/v1
-  name: llama-3.3-70b-versatile
+  name: openai/gpt-oss-120b
   fallback_models:                 # tried in order if the primary errors
-    - llama-3.1-8b-instant
+    - openai/gpt-oss-20b
+    - qwen/qwen3.8-27b
   temperature: 0.2                 # loop decisions: near-deterministic
   revise_temperature: 0.7          # rewriting can be warmer
 
