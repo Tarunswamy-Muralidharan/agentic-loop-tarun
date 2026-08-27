@@ -1,0 +1,34 @@
+# All runtime behaviour lives here. Secrets live in .env — never in this file.
+
+model:
+  provider: groq
+  base_url: https://api.groq.com/openai/v1
+  name: llama-3.3-70b-versatile
+  fallback_models:                 # tried in order if the primary errors
+    - llama-3.1-8b-instant
+  temperature: 0.2                 # loop decisions: near-deterministic
+  revise_temperature: 0.7          # rewriting can be warmer
+
+loop:
+  max_iterations: 10               # hard cap (Milestone 3 default)
+  stuck_threshold: 2               # identical reflections in a row -> STUCK
+  score_threshold: 4.2             # weighted rubric total (out of 5) that counts as done
+
+retry:
+  max_attempts: 4
+  base_delay_seconds: 1.0
+  max_delay_seconds: 30.0
+  jitter: true
+
+budget:
+  max_total_tokens: 40000          # exceed -> stop with PARTIAL
+  warn_at_tokens: 30000
+
+memory:
+  backend: chroma                  # chroma | json  (json = zero-dependency fallback)
+  path: .memory
+  collection: rubric_agent
+  recall_k: 3
+
+logging:
+  path: logs
