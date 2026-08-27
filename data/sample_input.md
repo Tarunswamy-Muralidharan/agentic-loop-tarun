@@ -1,5 +1,4 @@
-Our product is very good and extremely fast. Everyone who uses it says it is
-amazing and the best tool ever made. It does a lot of things that help teams
-work better and it is also very easy to use. You should definitely try it
-because it will really change the way you work and make everything so much
-better for everyone on the team.
+On June 2nd I took a cab from the airport to the hotel, which cost 850
+rupees. Lunch at Saravana Bhavan the same day came to 320. The hotel room
+was 4500 for the night of June 3. On June 4 I bought a train ticket back to
+Coimbatore for 615, and paid 95 for coffee and snacks at the station.

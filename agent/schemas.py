@@ -16,8 +16,8 @@ from typing import Any
 class Status(str, Enum):
     """Terminal status of a run. An explicit status beats returning None."""
 
-    DONE = "DONE"          # rubric threshold met
-    PARTIAL = "PARTIAL"    # max iterations / token budget hit; best draft returned
+    DONE = "DONE"          # validation threshold met
+    PARTIAL = "PARTIAL"    # max iterations / token budget hit; best table returned
     STUCK = "STUCK"        # identical reflections twice in a row
     FAILED = "FAILED"      # unrecoverable error (e.g. auth) after retries
 
@@ -27,15 +27,16 @@ class AgentState:
     """Everything the loop knows. Owned by run(); steps receive views of it."""
 
     goal: str
-    draft: str                      # current working text
-    original: str                   # untouched input, for the final comparison
+    source: str                     # the messy input text, never mutated
     iteration: int = 0
-    last_scores: dict[str, int] | None = None       # per-criterion, last scoring
-    weighted_total: float | None = None             # 0..5 weighted score
-    best_draft: str | None = None
+    table: dict[str, Any] | None = None            # {"columns": [...], "rows": [...]}
+    last_scores: dict[str, float] | None = None    # per-dimension validation scores
+    weighted_total: float | None = None            # 0..5 weighted validation score
+    defects: list[str] = field(default_factory=list)
+    missed_facts: list[str] = field(default_factory=list)
+    best_table: dict[str, Any] | None = None
     best_total: float = -1.0
-    critiques: dict[str, str] = field(default_factory=dict)
-    next_instruction: str = "No score yet. Score the draft first."
+    next_instruction: str = "No table yet. Extract a first table from the source."
     history: list[dict[str, Any]] = field(default_factory=list)
     done: bool = False
     status: Status | None = None
@@ -46,11 +47,13 @@ class Percept:
     """What this iteration is allowed to see. Built by perceive() only."""
 
     goal: str
-    draft: str
+    source: str
     iteration: int
-    last_scores: dict[str, int] | None
+    table: dict[str, Any] | None
+    last_scores: dict[str, float] | None
     weighted_total: float | None
-    critiques: dict[str, str]
+    defects: list[str]
+    missed_facts: list[str]
     next_instruction: str
     memory_notes: list[str]         # recalled from long-term memory
 
@@ -80,7 +83,7 @@ class Reflection:
     """reflect()'s judgement: continue or stop, and why."""
 
     is_done: bool
-    quality_score: float            # weighted rubric total, 0..5 (-1 if unknown)
+    quality_score: float            # weighted validation total, 0..5 (-1 if unknown)
     next_instruction: str
     summary: str                    # one line; also the stuck-detection fingerprint
     memory_record: dict[str, Any] | None = None   # what save() persists

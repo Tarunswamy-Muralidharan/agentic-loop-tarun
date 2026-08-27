@@ -1,8 +1,27 @@
 # agentic-loop-tarun
 
-Use case #23 — **score text against a rubric and improve it**. A hand-wired
+Use case #24 — **reformat text into a structured table**. A hand-wired
 agentic loop (`perceive → reason → act → reflect`) in plain Python. No agent
 frameworks; the LLM is called directly through the OpenAI SDK pointed at Groq.
+
+A one-shot extraction is easy; a *trustworthy* one is not. The loop makes the
+task genuinely iterative: **extract → validate → repair → re-validate**,
+stopping only when the validated score clears the threshold.
+
+## The validator is the point
+
+The table is scored 0–5 on four weighted dimensions. Three are **pure code**
+— deterministic, free, and immune to a model grading its own homework:
+
+| Dimension | Weight | How it is checked |
+|---|---|---|
+| groundedness | 0.35 | every non-empty cell value must appear in the source text (normalized match) — the anti-hallucination check |
+| coverage | 0.30 | LLM auditor lists source facts missing from the table |
+| completeness | 0.25 | code: fraction of filled cells |
+| consistency | 0.10 | code: uniform columns, no duplicate rows, sane shape |
+
+Defects and missed facts flow back into the next `extract_table` call as
+feedback, so each repair targets what actually failed.
 
 ## Setup
 
@@ -19,7 +38,7 @@ copy .env.example .env        # then paste your GROQ_API_KEY into .env
 python main.py                       # live run on data/sample_input.md
 python main.py --offline             # deterministic run, no key / no network
 python main.py --clear-memory        # wipe long-term memory first
-python main.py --input my_draft.md
+python main.py --input my_text.md
 ```
 
 Every run writes a JSON-Lines step log to `logs/run-<timestamp>.jsonl` —
@@ -31,7 +50,7 @@ summaries, latency and error.
 | Path | What it is |
 |---|---|
 | `agent/loop.py` | the four steps + `run()` — the core deliverable |
-| `agent/tools.py` | rubric (as data), 2 tool JSON-Schemas, handlers, registry |
+| `agent/tools.py` | 2 tool JSON-Schemas, handlers, code validators, registry |
 | `agent/prompts.py` | every prompt in the system |
 | `agent/memory_manager.py` | `save()` / `recall()` / `clear()` — Chroma, JSON fallback |
 | `agent/harness.py` | retries + jitter, model fallback chain, token budget, LLM adapter |

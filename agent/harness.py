@@ -180,14 +180,30 @@ class GroqLLM:
 
 
 class FakeLLM:
-    """Deterministic offline stand-in: score -> revise -> score(improved) -> finish.
+    """Deterministic offline stand-in:
+    extract(partial) -> validate(low) -> extract(repaired) -> validate(pass).
 
     Exists so the loop can be demoed and unit-tested with no key, no network,
-    and zero latency — and so a wifi failure cannot kill the live demo.
+    and zero latency — and so a wifi failure cannot kill the live demo. The
+    fake tables are built to exercise the REAL code validators: attempt 1 has
+    an empty cell and misses two source facts; attempt 2 repairs both.
     """
 
+    _PARTIAL = {"columns": ["item", "date", "amount"], "rows": [
+        {"item": "cab", "date": "June 2", "amount": "850"},
+        {"item": "lunch", "date": "", "amount": "320"},
+        {"item": "hotel room", "date": "June 3", "amount": "4500"},
+    ]}
+    _REPAIRED = {"columns": ["item", "date", "amount"], "rows": [
+        {"item": "cab", "date": "June 2", "amount": "850"},
+        {"item": "lunch", "date": "June 2", "amount": "320"},
+        {"item": "hotel room", "date": "June 3", "amount": "4500"},
+        {"item": "train ticket", "date": "June 4", "amount": "615"},
+        {"item": "coffee and snacks", "date": "June 4", "amount": "95"},
+    ]}
+
     def __init__(self) -> None:
-        self.scoring_round = 0
+        self.coverage_round = 0
         self.budget: TokenBudget | None = None   # main() attaches the shared budget
 
     def chat(self, messages, tools=None, response_format=None, temperature=0.2):
@@ -195,37 +211,33 @@ class FakeLLM:
         if self.budget:
             self.budget.add(usage)
         system = messages[0]["content"]
+        user = messages[-1]["content"]
 
-        if "writing judge" in system or "valid JSON" in system:   # scorer call
-            self.scoring_round += 1
-            s = ({"clarity": 3, "evidence": 2, "concision": 2, "tone": 2}
-                 if self.scoring_round == 1
-                 else {"clarity": 4, "evidence": 5, "concision": 4, "tone": 5})
-            return {"content": json.dumps({
-                "scores": s,
-                "critiques": {k: f"(fake critique of {k})" for k in s},
-            }), "tool_calls": []}, usage
+        if "convert messy prose" in system.lower() or "valid json" in system.lower():
+            # extractor call: repaired table iff validator feedback is present
+            table = self._REPAIRED if "validator reviewed" in user.lower() else self._PARTIAL
+            return {"content": json.dumps(table), "tool_calls": []}, usage
 
-        if "precise editor" in system:                            # reviser call
-            return {"content": "A clean, evidence-backed rewrite of the draft "
-                               "(offline mode; 27% faster in benchmark X)."}, usage
+        if "strict auditor" in system.lower():                    # coverage judge
+            self.coverage_round += 1
+            missed = (["train ticket back to Coimbatore for 615 on June 4",
+                       "coffee and snacks for 95 at the station"]
+                      if self.coverage_round == 1 else [])
+            return {"content": json.dumps({"missed_facts": missed}),
+                    "tool_calls": []}, usage
 
         # reason call: script the decision sequence off the visible state
-        user = messages[-1]["content"]
-        if "not scored yet" in user or "re-score" in user:
-            args = {"text": _extract_draft(user)}
+        if "(no table yet)" in user:
             return {"content": None, "tool_calls": [
-                {"id": "fake-1", "name": "score_against_rubric",
-                 "arguments": json.dumps(args)}]}, usage
-        if "weighted total 4." in user or "weighted total 5" in user:
-            return {"content": "FINISH — target met (offline)."}, usage
-        args = {"text": _extract_draft(user), "criterion": "evidence",
-                "guidance": "Add a concrete number or example."}
+                {"id": "fake-1", "name": "extract_table",
+                 "arguments": json.dumps({"text": "(held by handler)"})}]}, usage
+        if "validation is required" in user:
+            return {"content": None, "tool_calls": [
+                {"id": "fake-2", "name": "validate_table",
+                 "arguments": json.dumps({"text": "(held by handler)"})}]}, usage
+        if "Target met" in user:
+            return {"content": "FINISH — validated score at target (offline)."}, usage
         return {"content": None, "tool_calls": [
-            {"id": "fake-2", "name": "revise_text",
-             "arguments": json.dumps(args)}]}, usage
-
-
-def _extract_draft(user_msg: str) -> str:
-    m = re.search(r"---\n(.*?)\n---", user_msg, flags=re.DOTALL)
-    return m.group(1) if m else user_msg[:200]
+            {"id": "fake-3", "name": "extract_table",
+             "arguments": json.dumps({"text": "(held by handler)",
+                                      "feedback": "validator defects (offline)"})}]}, usage

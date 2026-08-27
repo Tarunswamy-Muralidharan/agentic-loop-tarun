@@ -36,15 +36,18 @@ def perceive(state: AgentState, memory, recall_k: int) -> Percept:
     is decided in one place — reason receives a finished Percept and cannot
     reach around it.
     """
-    query = f"improving text weakest {state.next_instruction} score {state.weighted_total}"
+    query = (f"tabulating text defects {' '.join(state.defects[:3])} "
+             f"score {state.weighted_total}")
     notes = memory.recall(query, k=recall_k)
     return Percept(
         goal=state.goal,
-        draft=state.draft,
+        source=state.source,
         iteration=state.iteration,
+        table=state.table,
         last_scores=state.last_scores,
         weighted_total=state.weighted_total,
-        critiques=state.critiques,
+        defects=state.defects,
+        missed_facts=state.missed_facts,
         next_instruction=state.next_instruction,
         memory_notes=notes,
     )
@@ -106,8 +109,8 @@ def act(decision: Decision, registry: dict[str, Any]) -> Observation:
 
 def reflect(state: AgentState, decision: Decision, obs: Observation,
             score_threshold: float) -> Reflection:
-    """Rule-based judgement. Deliberately NOT an LLM call: comparing two
-    numbers and diffing intent is cheaper, deterministic, and immune to the
+    """Rule-based judgement. Deliberately NOT an LLM call: comparing numbers
+    and reading a defect list is cheaper, deterministic, and immune to the
     model grading its own homework."""
     before = state.weighted_total
 
@@ -118,8 +121,7 @@ def reflect(state: AgentState, decision: Decision, obs: Observation,
                              f"Choose a different action.",
             summary=f"error:{obs.error}",
             memory_record={"iteration": state.iteration, "action": decision.tool_name,
-                           "target": str(decision.tool_args.get("criterion", "-")),
-                           "score_before": before, "score_after": before,
+                           "target": "-", "score_before": before, "score_after": before,
                            "lesson": f"failed: {obs.error}"},
         )
 
@@ -131,7 +133,8 @@ def reflect(state: AgentState, decision: Decision, obs: Observation,
             is_done=done,
             quality_score=before if before is not None else -1,
             next_instruction="" if done else
-                "You said FINISH but the target is not met — score or revise instead.",
+                "You said FINISH but there is no validated score at target — "
+                "extract or validate instead.",
             summary=f"final:{text[:60]}",
             memory_record=None if not done else
                 {"iteration": state.iteration, "action": "finish", "target": "-",
@@ -140,45 +143,56 @@ def reflect(state: AgentState, decision: Decision, obs: Observation,
         )
 
     result = obs.content
-    if decision.tool_name == "score_against_rubric":
-        after = result["weighted_total"]
-        state.last_scores = result["scores"]
-        state.critiques = result["critiques"]
-        state.weighted_total = after
-        if after > state.best_total:
-            state.best_total, state.best_draft = after, state.draft
-        met = after >= score_threshold
+    if decision.tool_name == "extract_table":
+        state.table = result["table"]
+        # A fresh extraction invalidates any previous score: force re-validation.
+        state.last_scores, state.weighted_total = None, None
+        was_repair = bool(decision.tool_args.get("feedback"))
         return Reflection(
-            is_done=met,
-            quality_score=after,
-            next_instruction="Target met — reply FINISH." if met else
-                f"Revise the weakest criterion: {result['weakest_criterion']}.",
-            summary=f"scored:{after}",
-            memory_record={"iteration": state.iteration, "action": "score", "target": "-",
-                           "score_before": before, "score_after": after,
-                           "lesson": f"weakest={result['weakest_criterion']}"},
+            is_done=False,
+            quality_score=-1,
+            next_instruction="Table extracted — validate it to get a score.",
+            summary=f"extracted:{result['n_rows']}x{result['n_cols']}"
+                    f"{':repair' if was_repair else ''}",
+            memory_record={"iteration": state.iteration, "action": "extract",
+                           "target": "repair" if was_repair else "initial",
+                           "score_before": before, "score_after": None,
+                           "lesson": f"extracted {result['n_rows']} rows x "
+                                     f"{result['n_cols']} cols, effect unknown until validation"},
         )
 
-    # revise_text: adopt the new draft; verdict comes from the next scoring.
-    state.draft = result["revised_text"]
+    # validate_table: adopt the verdict; done if the threshold is met.
+    after = result["weighted_total"]
+    state.last_scores = result["scores"]
+    state.weighted_total = after
+    state.defects = result["defects"]
+    state.missed_facts = result["missed_facts"]
+    if after > state.best_total:
+        state.best_total, state.best_table = after, state.table
+    met = after >= score_threshold
+    weakest = min(result["scores"], key=result["scores"].get)
+    feedback_hint = "; ".join((result["defects"] + result["missed_facts"])[:4])
     return Reflection(
-        is_done=False,
-        quality_score=before if before is not None else -1,
-        next_instruction="Draft was revised — re-score to measure the effect.",
-        summary=f"revised:{result['criterion']}",
-        memory_record={"iteration": state.iteration, "action": "revise",
-                       "target": result["criterion"],
-                       "score_before": before, "score_after": None,
-                       "lesson": f"revised {result['criterion']}, effect unknown until re-score"},
+        is_done=met,
+        quality_score=after,
+        next_instruction="Target met — reply FINISH." if met else
+            f"Re-extract with feedback to fix the weakest dimension "
+            f"({weakest}): {feedback_hint}",
+        summary=f"validated:{after}",
+        memory_record={"iteration": state.iteration, "action": "validate", "target": weakest,
+                       "score_before": before, "score_after": after,
+                       "lesson": f"weakest={weakest}; "
+                                 f"{len(result['defects'])} defects, "
+                                 f"{len(result['missed_facts'])} missed facts"},
     )
 
 
 # --------------------------------------------------------------------- run --
 
-def run(goal: str, draft: str, llm, registry, tool_schemas, memory, logger,
+def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
         cfg: dict[str, Any]) -> AgentState:
     loop_cfg = cfg["loop"]
-    state = AgentState(goal=goal, draft=draft, original=draft)
+    state = AgentState(goal=goal, source=source)
     recent_fingerprints: list[str] = []
     consecutive_errors = 0
 
@@ -224,13 +238,16 @@ def run(goal: str, draft: str, llm, registry, tool_schemas, memory, logger,
             break
 
         # Stuck detection: identical reflections twice in a row -> STUCK.
+        # For this use case that means two validations with the same score —
+        # the repair in between achieved nothing, so more loops won't either.
         fp = hashlib.sha256(reflection.summary.encode()).hexdigest()
-        recent_fingerprints.append(fp)
-        if (len(recent_fingerprints) >= loop_cfg["stuck_threshold"]
-                and len(set(recent_fingerprints[-loop_cfg["stuck_threshold"]:])) == 1):
-            state.done, state.status = True, Status.STUCK
-            logger.event("stop", "STUCK: identical reflection twice in a row")
-            break
+        if reflection.summary.startswith("validated:"):
+            recent_fingerprints.append(fp)
+            if (len(recent_fingerprints) >= loop_cfg["stuck_threshold"]
+                    and len(set(recent_fingerprints[-loop_cfg["stuck_threshold"]:])) == 1):
+                state.done, state.status = True, Status.STUCK
+                logger.event("stop", "STUCK: identical validation score twice in a row")
+                break
 
         if llm.budget.exceeded:
             state.done, state.status = True, Status.PARTIAL
@@ -239,10 +256,10 @@ def run(goal: str, draft: str, llm, registry, tool_schemas, memory, logger,
 
     if state.status is None:                         # loop cap without finishing
         state.status = Status.PARTIAL
-        logger.event("stop", "max_iterations reached; returning best draft")
+        logger.event("stop", "max_iterations reached; returning best table")
 
-    # PARTIAL/STUCK contract: always hand back the best draft seen, honestly.
-    if state.status is not Status.DONE and state.best_draft:
-        state.draft = state.best_draft
+    # PARTIAL/STUCK contract: always hand back the best table seen, honestly.
+    if state.status is not Status.DONE and state.best_table:
+        state.table = state.best_table
         state.weighted_total = state.best_total
     return state
