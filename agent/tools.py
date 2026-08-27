@@ -71,6 +71,26 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "recall_memory",
+            "description": (
+                "Search long-term memory of past runs on this source for "
+                "lessons — what was tried and what moved the score. Cheap and "
+                "local; consult it whenever history might save a wasted attempt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string",
+                              "description": "What you want lessons about, e.g. "
+                                             "'repairs that improved coverage'."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish_task",
             "description": (
                 "End the run with your verdict. Use outcome 'success' when a "
@@ -181,7 +201,8 @@ def check_consistency(table: dict[str, Any]) -> tuple[float, list[str]]:
 
 # -------------------------------------------------------------- handlers ----
 
-def build_registry(llm: Any, source: str) -> dict[str, Callable[..., dict[str, Any]]]:
+def build_registry(llm: Any, source: str,
+                   memory: Any = None) -> dict[str, Callable[..., dict[str, Any]]]:
     """Return {tool_name: handler}. `llm` is anything with .chat(...).
 
     The registry closes over `source` and the latest extracted table so the
@@ -244,8 +265,17 @@ def build_registry(llm: Any, source: str) -> dict[str, Callable[..., dict[str, A
             raise ValueError(f"unknown outcome {outcome!r}")
         return {"outcome": outcome, "explanation": explanation}
 
+    def recall_memory(query: str) -> dict[str, Any]:
+        """On-demand memory consultation — the agent decides when history is
+        worth checking (on top of the automatic read the spec mandates)."""
+        from agent.memory_manager import source_hash
+        if memory is None:
+            return {"lessons": [], "note": "no memory backend attached"}
+        lessons = memory.recall(query, k=5, source_hash=source_hash(source))
+        return {"lessons": lessons or ["(no lessons recorded for this source yet)"]}
+
     return {"extract_table": extract_table, "validate_table": validate_table,
-            "finish_task": finish_task}
+            "finish_task": finish_task, "recall_memory": recall_memory}
 
 
 def _valid_table(data: dict[str, Any]) -> bool:

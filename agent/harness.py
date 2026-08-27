@@ -226,23 +226,32 @@ class FakeLLM:
             return {"content": json.dumps({"missed_facts": missed}),
                     "tool_calls": []}, usage
 
-        # reason call: script agent-like decisions off the visible facts.
+        # reason turn: script agent-like decisions by reading the CONVERSATION,
+        # exactly as the real model does — last tool result drives the choice.
+        self._n = getattr(self, "_n", 0) + 1
+
         def call(name, args):
             return {"content": None, "tool_calls": [
-                {"id": "fake", "name": name, "arguments": json.dumps(args)}]}, usage
+                {"id": f"fake-{self._n}", "name": name,
+                 "arguments": json.dumps(args)}]}, usage
 
-        if "June" not in user:                       # gibberish input -> refuse early
+        task_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
+        if "June" not in task_msg:                   # gibberish input -> refuse early
             return call("finish_task",
                         {"outcome": "not_tabulatable",
                          "explanation": "The source contains no recognizable facts "
                                         "to tabulate (offline judgement)."})
-        if "meets target" in user:                   # validated at target -> claim done
-            return call("finish_task",
-                        {"outcome": "success",
-                         "explanation": "Validated score meets the target (offline)."})
-        if "no table exists" in user:
+
+        last_tool = next((m["content"] for m in reversed(messages)
+                          if m["role"] == "tool"), None)
+        if last_tool is None:                        # nothing done yet -> extract
             return call("extract_table", {"text": "(held by handler)"})
-        if "has NOT been validated" in user:
-            return call("validate_table", {"text": "(held by handler)"})
-        return call("extract_table", {"text": "(held by handler)",
-                                      "feedback": "validator defects (offline)"})
+        result = json.loads(last_tool)
+        if "weighted_total" in result:               # a validation verdict is in
+            if result["weighted_total"] >= 4.2:
+                return call("finish_task",
+                            {"outcome": "success",
+                             "explanation": "Validated score meets the target (offline)."})
+            return call("extract_table", {"text": "(held by handler)",
+                                          "feedback": "validator defects (offline)"})
+        return call("validate_table", {"text": "(held by handler)"})

@@ -38,27 +38,11 @@ class AgentState:
     best_table: dict[str, Any] | None = None
     best_total: float = -1.0
     best_scores: dict[str, float] | None = None
-    next_instruction: str = "First iteration: nothing has happened yet."
     verdict: str | None = None      # the agent's own explanation when it finishes
-    history: list[dict[str, Any]] = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)  # the conversation
+    notes_seen: str = ""            # fingerprint of memory notes already shown
     done: bool = False
     status: Status | None = None
-
-
-@dataclass
-class Percept:
-    """What this iteration is allowed to see. Built by perceive() only."""
-
-    goal: str
-    source: str
-    iteration: int
-    table: dict[str, Any] | None
-    last_scores: dict[str, float] | None
-    weighted_total: float | None
-    defects: list[str]
-    missed_facts: list[str]
-    next_instruction: str
-    memory_notes: list[str]         # recalled from long-term memory
 
 
 @dataclass
@@ -71,6 +55,8 @@ class Decision:
     final_text: str | None = None
     reasoning: str | None = None    # the model's own trace, for the log
     dropped_calls: int = 0          # extra tool calls the model emitted beyond one
+    call_id: str | None = None      # provider tool_call id, for the tool message
+    raw_arguments: str | None = None  # arguments as the model sent them (verbatim)
 
 
 @dataclass

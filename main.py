@@ -73,7 +73,7 @@ def main() -> int:
 
     print(f"— run start: {len(source)} chars, backend={type(llm).__name__}, "
           f"memory={type(memory).__name__}\n")
-    state = run(GOAL, source, llm, build_registry(llm, source), TOOL_SCHEMAS,
+    state = run(GOAL, source, llm, build_registry(llm, source, memory), TOOL_SCHEMAS,
                 memory, logger, cfg)
 
     print("\n" + "=" * 62)

@@ -10,72 +10,62 @@ from typing import Any
 
 # ---------------------------------------------------------------- reason ----
 
-REASON_SYSTEM = """\
+AGENT_SYSTEM = """\
 You are an autonomous agent. Your goal: turn the source text into a
 structured table you can PROVE is faithful — or decide, on your own
 judgement, that the task cannot be done and say why.
 
-There is no fixed sequence. Every turn, YOU decide the single next action
-by calling exactly one tool. What you know about your world:
+There is no fixed sequence and no supervisor: this conversation is your
+working memory, every tool result you see is something you did, and YOU
+decide the single next action each turn by calling exactly one tool.
 
+Your capabilities:
 - extract_table drafts a table from the source. Pass `feedback` to target
   specific problems in a previous attempt.
-- validate_table measures the current table against the source. An
-  unvalidated table has no evidentiary weight — you cannot know it is good.
+- validate_table measures the current table against the source and returns
+  per-dimension scores, defects and missed facts. An unvalidated table has
+  no evidentiary weight — you cannot know it is good.
+- recall_memory searches your long-term memory of past runs on this source
+  for lessons (what was tried, what moved the score). Consult it whenever
+  history might save you a wasted attempt.
 - finish_task ends the run. outcome "success" is only accepted by the
   harness when a validated score meets the target; outcome "not_tabulatable"
   is YOUR judgement that the input has no extractable facts (gibberish,
   empty, a bare question, pure opinion with nothing to tabulate).
 
 Judge the input first. If there is nothing tabular in it, finish immediately
-with outcome not_tabulatable and a clear explanation — do not waste
-iterations extracting from noise. Spend iterations only where they can
-improve a provable result.
+with outcome not_tabulatable and a clear explanation — do not waste turns
+extracting from noise. A validated score at target is success; endless
+polishing past it is spend, not progress.
 """
 
 
-def reason_user(percept: Any, target: float) -> str:
-    """Build the user message for the reason step. Facts only — what is true
-    right now. No instructions: the decision belongs to the model."""
-    if percept.last_scores is None:
-        scores = ("none yet — the current table has NOT been validated"
-                  if percept.table else "none — no table exists")
-    else:
-        relation = ("meets target — a finish_task(success) claim would be "
-                    "accepted right now"
-                    if percept.weighted_total >= target else "below target")
-        scores = (", ".join(f"{k}={v:.1f}/5" for k, v in percept.last_scores.items())
-                  + f"  (weighted total {percept.weighted_total:.2f}/5, "
-                    f"target {target} — {relation})")
-    defects = "\n".join(f"- {d}" for d in percept.defects) or "(none reported)"
-    missed = "\n".join(f"- {m}" for m in percept.missed_facts) or "(none reported)"
-    memory = "\n".join(f"- {m}" for m in percept.memory_notes) or "(no relevant memory)"
-    table = (json.dumps(percept.table, ensure_ascii=False)[:800]
-             if percept.table else "(none)")
+def initial_user(source: str, target: float, memory_notes: list[str]) -> str:
+    """The opening message of the conversation: the task, the source, and the
+    automatic memory read (Milestone 2: memory is read at the start of
+    reasoning and passed as context)."""
+    notes = "\n".join(f"- {n}" for n in memory_notes) or "(none yet)"
     return f"""\
-Iteration {percept.iteration}.
-Goal: {percept.goal}
+Task: reformat the source text below into a structured table. The weighted
+validation target is {target}/5.
 
 Source text:
 ---
-{percept.source}
+{source}
 ---
 
-Current table: {table}
-Validation: {scores}
-Defects found by the validator:
-{defects}
-Facts the validator says were missed:
-{missed}
+Lessons from long-term memory for this source:
+{notes}
 
-What happened last iteration:
-{percept.next_instruction}
-
-Lessons recalled from memory:
-{memory}
-
-Decide your single next action.
+Decide your first action.
 """
+
+
+def memory_note(notes: list[str]) -> str:
+    """Appended mid-conversation only when the automatic recall surfaces
+    lessons the agent has not been shown yet."""
+    lines = "\n".join(f"- {n}" for n in notes)
+    return f"[memory] Newly recalled lessons for this source:\n{lines}"
 
 
 # --------------------------------------------------------------- extract ----

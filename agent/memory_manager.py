@@ -19,6 +19,13 @@ import uuid
 from typing import Any
 
 
+def source_hash(text: str) -> str:
+    """Short stable fingerprint of a source text — scopes memory so lessons
+    from one input never bias runs on a different input."""
+    import hashlib
+    return hashlib.sha256(text.strip().encode()).hexdigest()[:16]
+
+
 class BaseMemory:
     def save(self, record: dict[str, Any]) -> None: ...
     def recall(self, query: str, k: int = 3,
