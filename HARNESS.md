@@ -10,12 +10,16 @@
        retry, which deliberately don't (auth), and why jitter exists
        (thundering herd).
      - Model fallback chain (GroqLLM.chat): retired model / provider outage.
-     - Simplified-prompt retry on bad JSON (tools.score_against_rubric).
+     - Simplified-prompt retry on bad JSON (tools.extract_table).
      - Unknown-tool refusal + graceful error observations (loop.act):
        why errors are returned to the agent instead of raised.
-     - Rule-based reflect: why NOT LLM-as-judge for the stop decision.
-     - max_iterations, stuck detection (identical reflections), token
-       budget: what each cap costs and what it prevents.
-     - PARTIAL contract: why the best draft is returned honestly instead
+     - Rule-based reflect + code validators: why NOT LLM-as-judge for
+       groundedness/completeness/consistency (deterministic, free, and the
+       grounding check is the anti-hallucination control — a model cannot
+       talk its way past a substring match).
+     - max_iterations, stuck detection (identical validation score twice —
+       the repair achieved nothing), token budget: what each cap costs and
+       what it prevents.
+     - PARTIAL contract: why the best table is returned honestly instead
        of pretending success or returning nothing.
      - config.yaml vs .env split: what lives where and why. -->
