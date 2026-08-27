@@ -38,7 +38,12 @@ def perceive(state: AgentState, memory, recall_k: int) -> Percept:
     """
     query = (f"tabulating text defects {' '.join(state.defects[:3])} "
              f"score {state.weighted_total}")
-    notes = memory.recall(query, k=recall_k)
+    try:
+        notes = memory.recall(query, k=recall_k)
+    except Exception as exc:   # noqa: BLE001 — required fallback: a memory read
+        # failure must never kill the run; continue without memory, warn loudly.
+        print(f"[memory] WARNING: recall failed ({exc}); continuing without memory")
+        notes = []
     return Percept(
         goal=state.goal,
         source=state.source,
@@ -201,8 +206,13 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
 
         t0 = time.perf_counter()
         percept = perceive(state, memory, cfg["memory"]["recall_k"])
+        # Log the actual recalled text, not just a count — the demo has to
+        # SHOW memory influencing the next decision, and this line is where
+        # that influence becomes visible.
+        notes_view = (" | ".join(n[:70] for n in percept.memory_notes[:2])
+                      or "none")
         logger.step(state.iteration, "perceive", state.next_instruction,
-                    f"{len(percept.memory_notes)} memory notes recalled", t0)
+                    f"{len(percept.memory_notes)} memory notes recalled: {notes_view}", t0)
 
         t0 = time.perf_counter()
         try:
@@ -230,7 +240,12 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
                     f"done={reflection.is_done} score={reflection.quality_score}", t0)
 
         if reflection.memory_record:                 # write AFTER reflect (Milestone 2)
-            memory.save(reflection.memory_record)
+            try:
+                memory.save(reflection.memory_record)
+            except Exception as exc:   # noqa: BLE001 — a memory WRITE failure
+                # must not kill the run either; the loop just loses one lesson.
+                logger.event("memory_warning", f"save failed ({exc}); "
+                                               f"continuing without persisting this lesson")
         state.next_instruction = reflection.next_instruction
 
         if reflection.is_done:
