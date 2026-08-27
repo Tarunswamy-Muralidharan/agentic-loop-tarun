@@ -230,8 +230,8 @@ class FakeLLM:
         # exactly as the real model does — last tool result drives the choice.
         self._n = getattr(self, "_n", 0) + 1
 
-        def call(name, args):
-            return {"content": None, "tool_calls": [
+        def call(name, args, thought=""):
+            return {"content": thought, "tool_calls": [
                 {"id": f"fake-{self._n}", "name": name,
                  "arguments": json.dumps(args)}]}, usage
 
@@ -240,18 +240,33 @@ class FakeLLM:
             return call("finish_task",
                         {"outcome": "not_tabulatable",
                          "explanation": "The source contains no recognizable facts "
-                                        "to tabulate (offline judgement)."})
+                                        "to tabulate (offline judgement)."},
+                        thought="PERCEIVE: The source contains no dates, amounts or "
+                                "entities — nothing tabular. REASON: Extracting from "
+                                "noise wastes turns; I should refuse with a verdict.")
 
         last_tool = next((m["content"] for m in reversed(messages)
                           if m["role"] == "tool"), None)
         if last_tool is None:                        # nothing done yet -> extract
-            return call("extract_table", {"text": "(held by handler)"})
+            return call("extract_table", {"text": "(held by handler)"},
+                        thought="PERCEIVE: No table exists yet; the source lists "
+                                "dated expenses. REASON: Draft a first table, then "
+                                "measure it.")
         result = json.loads(last_tool)
         if "weighted_total" in result:               # a validation verdict is in
             if result["weighted_total"] >= 4.2:
                 return call("finish_task",
                             {"outcome": "success",
-                             "explanation": "Validated score meets the target (offline)."})
+                             "explanation": "Validated score meets the target (offline)."},
+                            thought="REFLECT: Validation confirms the repair worked. "
+                                    "PERCEIVE: The score meets the target. REASON: "
+                                    "Claim success while the evidence stands.")
             return call("extract_table", {"text": "(held by handler)",
-                                          "feedback": "validator defects (offline)"})
-        return call("validate_table", {"text": "(held by handler)"})
+                                          "feedback": "validator defects (offline)"},
+                        thought="REFLECT: Validation found defects and missed facts. "
+                                "PERCEIVE: Score is below target. REASON: Re-extract "
+                                "targeting exactly what the validator flagged.")
+        return call("validate_table", {"text": "(held by handler)"},
+                    thought="REFLECT: A fresh table exists but is unmeasured. "
+                            "PERCEIVE: An unvalidated table has no evidentiary "
+                            "weight. REASON: Validate before anything else.")

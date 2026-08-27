@@ -127,20 +127,21 @@ def reflect(state: AgentState, decision: Decision, obs: Observation,
                            "lesson": f"failed: {obs.error}"},
         )
 
+    # A content-only reply is thinking without acting: acknowledge it
+    # neutrally and remind the contract. It is NOT a claim of any kind —
+    # endings happen only through the finish_task tool.
+    if decision.kind == "final":
+        return Reflection(
+            is_done=False,
+            quality_score=before if before is not None else -1,
+            next_instruction="[harness] Reply noted, but no tool was called — "
+                            "every turn must end in exactly one tool call. "
+                            "If you intend to end the run, call finish_task.",
+            summary="no-tool-call", memory_record=None)
+
     # ---- the agent decided to end the run -----------------------------------
-    if decision.tool_name == "finish_task" or decision.kind == "final":
-        if decision.kind == "final":
-            text = str(obs.content or "").strip()
-            if not text:
-                return Reflection(
-                    is_done=False,
-                    quality_score=before if before is not None else -1,
-                    next_instruction="[harness] Your last reply contained no tool "
-                                     "call and no content — nothing happened.",
-                    summary="empty-reply", memory_record=None)
-            verdict = {"outcome": "success", "explanation": text}
-        else:
-            verdict = obs.content
+    if decision.tool_name == "finish_task":
+        verdict = obs.content
 
         if verdict["outcome"] == "not_tabulatable":
             if state.best_total >= score_threshold:      # invariant 2
@@ -255,6 +256,10 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
             continue
         logger.step(state.iteration, "reason", f"iter {state.iteration}",
                     f"{decision.kind}:{decision.tool_name or decision.final_text}", t0)
+        if decision.reasoning:
+            # The model's own REFLECT/PERCEIVE/REASON phases — the cognition
+            # is prompt-structured model output, and the demo shows it live.
+            logger.event("cognition", decision.reasoning[:400])
         if decision.dropped_calls:
             logger.event("dropped_calls",
                          f"model emitted {decision.dropped_calls + 1} tool calls; "
@@ -316,13 +321,25 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
         else:
             extract_streak = 0
 
-        # Stuck: identical reflection outcome twice in a row.
+        # Stuck: identical reflection outcome twice in a row. If the target
+        # was already met, cycling is not failure — end DONE with the best
+        # table (same philosophy as the patience backstop).
         fp = hashlib.sha256(reflection.summary.encode()).hexdigest()
         recent.append(fp)
         if (len(recent) >= loop_cfg["stuck_threshold"]
                 and len(set(recent[-loop_cfg["stuck_threshold"]:])) == 1):
-            state.done, state.status = True, Status.STUCK
-            logger.event("stop", "STUCK: identical reflection twice in a row")
+            state.done = True
+            if state.best_total >= threshold:
+                state.status = Status.DONE
+                state.table = state.best_table
+                state.weighted_total = state.best_total
+                state.last_scores = state.best_scores
+                state.verdict = (f"Harness: loop cycling but target already met "
+                                 f"(best {state.best_total}) — returning the best table.")
+                logger.event("stop", state.verdict)
+            else:
+                state.status = Status.STUCK
+                logger.event("stop", "STUCK: identical reflection twice in a row")
             break
 
         # Patience: target met, bounded window to beat the best, then DONE.
