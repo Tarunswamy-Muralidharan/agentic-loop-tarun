@@ -21,7 +21,8 @@ from typing import Any
 
 class BaseMemory:
     def save(self, record: dict[str, Any]) -> None: ...
-    def recall(self, query: str, k: int = 3) -> list[str]: ...
+    def recall(self, query: str, k: int = 3,
+               source_hash: str | None = None) -> list[str]: ...
     def clear(self) -> None: ...
 
 
@@ -52,10 +53,18 @@ class ChromaMemory(BaseMemory):
                         if isinstance(v, (str, int, float, bool))}],
         )
 
-    def recall(self, query: str, k: int = 3) -> list[str]:
+    def recall(self, query: str, k: int = 3,
+               source_hash: str | None = None) -> list[str]:
+        """Recall is scoped to the SAME source text when a hash is given: a
+        refusal lesson from a gibberish run must never bias a run on real
+        data. Strict by design — no cross-source fallback; an empty result
+        for a fresh source is correct, not a failure."""
         if self.col.count() == 0:
             return []
-        res = self.col.query(query_texts=[query], n_results=min(k, self.col.count()))
+        kwargs: dict = dict(query_texts=[query], n_results=min(k, self.col.count()))
+        if source_hash:
+            kwargs["where"] = {"source_hash": source_hash}
+        res = self.col.query(**kwargs)
         return res["documents"][0] if res["documents"] else []
 
     def clear(self) -> None:
@@ -83,9 +92,12 @@ class JsonMemory(BaseMemory):
         with open(self.file, "w", encoding="utf-8") as f:
             json.dump(rows, f, ensure_ascii=False, indent=1)
 
-    def recall(self, query: str, k: int = 3) -> list[str]:
+    def recall(self, query: str, k: int = 3,
+               source_hash: str | None = None) -> list[str]:
         words = set(query.lower().split())
         rows = self._load()
+        if source_hash:                          # strict same-source scoping
+            rows = [r for r in rows if r.get("source_hash") == source_hash]
         scored = sorted(
             rows,
             key=lambda r: (len(words & set(r["note"].lower().split())), r["ts"]),

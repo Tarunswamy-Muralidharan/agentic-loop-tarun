@@ -13,7 +13,10 @@ model:
 loop:
   max_iterations: 10               # hard cap (Milestone 3 default)
   stuck_threshold: 2               # identical reflections in a row -> STUCK
-  score_threshold: 4.2             # weighted rubric total (out of 5) that counts as done
+  score_threshold: 4.2             # weighted validation total (out of 5) that counts as done
+  patience_after_target: 4         # once the target is met: iterations allowed with no
+                                   # improvement before the harness ends the run (DONE,
+                                   # best table) — bounds perfectionism loops
 
 retry:
   max_attempts: 4

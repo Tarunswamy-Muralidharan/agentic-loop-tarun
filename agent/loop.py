@@ -25,6 +25,13 @@ from agent.schemas import (AgentState, Decision, Observation, Percept,
                            Reflection, Status)
 
 MAX_MODEL_ERRORS = 2   # consecutive reason/tool failures tolerated before FAILED
+EXTRACT_STREAK_WARN = 2   # consecutive extractions without validating -> surface a fact
+
+
+def source_hash(text: str) -> str:
+    """Short stable fingerprint of the source text — scopes memory recall so
+    lessons from one input never bias runs on a different input."""
+    return hashlib.sha256(text.strip().encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------- perceive --
@@ -39,7 +46,7 @@ def perceive(state: AgentState, memory, recall_k: int) -> Percept:
     query = (f"tabulating text defects {' '.join(state.defects[:3])} "
              f"score {state.weighted_total}")
     try:
-        notes = memory.recall(query, k=recall_k)
+        notes = memory.recall(query, k=recall_k, source_hash=source_hash(state.source))
     except Exception as exc:   # noqa: BLE001 — required fallback: a memory read
         # failure must never kill the run; continue without memory, warn loudly.
         print(f"[memory] WARNING: recall failed ({exc}); continuing without memory")
@@ -74,6 +81,7 @@ def reason(percept: Percept, llm, tool_schemas: list[dict], target: float) -> De
     )
     if msg["tool_calls"]:
         call = msg["tool_calls"][0]                    # exactly one tool per turn
+        dropped = len(msg["tool_calls"]) - 1           # surfaced in the log, not silent
         try:
             args = json.loads(call["arguments"])
         except json.JSONDecodeError:
@@ -81,7 +89,7 @@ def reason(percept: Percept, llm, tool_schemas: list[dict], target: float) -> De
                             final_text=f"MALFORMED tool arguments for {call['name']}",
                             reasoning="model emitted unparseable arguments")
         return Decision(kind="tool_call", tool_name=call["name"], tool_args=args,
-                        reasoning=msg["content"])
+                        reasoning=msg["content"], dropped_calls=dropped)
     return Decision(kind="final", final_text=(msg["content"] or "").strip(),
                     reasoning=msg["content"])
 
@@ -136,11 +144,33 @@ def reflect(state: AgentState, decision: Decision, obs: Observation,
     # ---- the agent decided to end the run -----------------------------------
     if decision.tool_name == "finish_task" or decision.kind == "final":
         if decision.kind == "final":            # legacy plain-text path
-            verdict = {"outcome": "success", "explanation": str(obs.content or "")}
+            text = str(obs.content or "").strip()
+            if not text:                        # empty reply: report it accurately
+                return Reflection(
+                    is_done=False,
+                    quality_score=before if before is not None else -1,
+                    next_instruction="Fact: your last reply contained no tool call "
+                                     "and no content — nothing happened.",
+                    summary="empty-reply",
+                    memory_record=None,
+                )
+            verdict = {"outcome": "success", "explanation": text}
         else:
             verdict = obs.content
 
         if verdict["outcome"] == "not_tabulatable":
+            # Invariant #2: a refusal is contradictory once a validated table
+            # already meets the target — evidence beats a late change of mind.
+            if state.best_total >= score_threshold:
+                return Reflection(
+                    is_done=False,
+                    quality_score=before if before is not None else -1,
+                    next_instruction="Fact: your refusal was rejected — a validated "
+                                     f"table scoring {state.best_total} (>= target) "
+                                     "already exists for this source.",
+                    summary="refusal-rejected",
+                    memory_record=None,
+                )
             state.status = Status.REFUSED
             state.verdict = verdict["explanation"]
             return Reflection(
@@ -204,13 +234,17 @@ def reflect(state: AgentState, decision: Decision, obs: Observation,
     state.missed_facts = result["missed_facts"]
     if after > state.best_total:
         state.best_total, state.best_table = after, state.table
+        state.best_scores = result["scores"]
     weakest = min(result["scores"], key=result["scores"].get)
-    relation = "meets" if after >= score_threshold else "is below"
+    relation = ("meets the target — a finish_task(success) claim would be "
+                "accepted right now" if after >= score_threshold
+                else "is below the target")
     return Reflection(
         is_done=False,
         quality_score=after,
         next_instruction=f"Fact: validation scored {after}/5, which {relation} "
-                         f"the target {score_threshold}. Weakest dimension: {weakest}. "
+                         f"({score_threshold}). Best validated so far: "
+                         f"{state.best_total}. Weakest dimension: {weakest}. "
                          f"{len(result['defects'])} defect(s), "
                          f"{len(result['missed_facts'])} missed fact(s).",
         summary=f"validated:{after}",
@@ -230,6 +264,8 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
     state = AgentState(goal=goal, source=source)
     recent_fingerprints: list[str] = []
     consecutive_errors = 0
+    extract_streak = 0
+    no_improve = 0
 
     while not state.done and state.iteration < loop_cfg["max_iterations"]:
         state.iteration += 1
@@ -258,6 +294,10 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
             continue
         logger.step(state.iteration, "reason", f"iter {state.iteration}",
                     f"{decision.kind}:{decision.tool_name or decision.final_text}", t0)
+        if decision.dropped_calls:
+            logger.event("dropped_calls",
+                         f"model emitted {decision.dropped_calls + 1} tool calls; "
+                         f"only the first was executed (one tool per turn)")
 
         t0 = time.perf_counter()
         obs = act(decision, registry)
@@ -265,11 +305,13 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
                     obs.content if obs.ok else "-", t0, error=obs.error)
 
         t0 = time.perf_counter()
+        prev_best = state.best_total
         reflection = reflect(state, decision, obs, loop_cfg["score_threshold"])
         logger.step(state.iteration, "reflect", reflection.summary,
                     f"done={reflection.is_done} score={reflection.quality_score}", t0)
 
         if reflection.memory_record:                 # write AFTER reflect (Milestone 2)
+            reflection.memory_record["source_hash"] = source_hash(state.source)
             try:
                 memory.save(reflection.memory_record)
             except Exception as exc:   # noqa: BLE001 — a memory WRITE failure
@@ -278,11 +320,43 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
                                                f"continuing without persisting this lesson")
         state.next_instruction = reflection.next_instruction
 
+        # Extraction-streak guard: repeatedly redrafting without measuring is
+        # the varied-spinning failure mode identical-fingerprint stuck can't
+        # see. Surface it as a fact — the agent still decides, but knowingly.
+        if reflection.summary.startswith("extracted"):
+            extract_streak += 1
+            if extract_streak > EXTRACT_STREAK_WARN:
+                state.next_instruction += (
+                    f" Fact: you have now extracted {extract_streak} times in a row "
+                    f"without validating — none of these tables has any "
+                    f"evidentiary weight until one is measured.")
+        else:
+            extract_streak = 0
+
         if reflection.is_done:
             state.done = True
             if state.status is None:        # reflect may have set REFUSED already
                 state.status = Status.DONE
             break
+
+        # Patience backstop (bounded perfectionism): once a validated table
+        # has met the target, the agent gets a limited window to improve on
+        # the best score. No improvement inside that window -> the harness
+        # ends the run as DONE with the best table. Same family of guardrail
+        # as max_iterations — the target was met; endless polishing is spend,
+        # not progress.
+        if state.best_total >= loop_cfg["score_threshold"]:
+            no_improve = 0 if state.best_total > prev_best else no_improve + 1
+            if no_improve >= loop_cfg.get("patience_after_target", 4):
+                state.done, state.status = True, Status.DONE
+                state.table = state.best_table          # hand back the BEST table
+                state.weighted_total = state.best_total
+                state.last_scores = state.best_scores   # keep the display consistent
+                state.verdict = (f"Harness: target met (best validated score "
+                                 f"{state.best_total}); no improvement in "
+                                 f"{no_improve} iterations — returning the best table.")
+                logger.event("stop", state.verdict)
+                break
 
         # Stuck detection (the challenge's literal rule): if reflect returns
         # identical output twice in a row, the loop is cycling — an identical
@@ -309,4 +383,5 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
     if state.status is not Status.DONE and state.best_table:
         state.table = state.best_table
         state.weighted_total = state.best_total
+        state.last_scores = state.best_scores
     return state

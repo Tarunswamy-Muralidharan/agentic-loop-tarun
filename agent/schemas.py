@@ -37,6 +37,7 @@ class AgentState:
     missed_facts: list[str] = field(default_factory=list)
     best_table: dict[str, Any] | None = None
     best_total: float = -1.0
+    best_scores: dict[str, float] | None = None
     next_instruction: str = "First iteration: nothing has happened yet."
     verdict: str | None = None      # the agent's own explanation when it finishes
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -69,6 +70,7 @@ class Decision:
     tool_args: dict[str, Any] = field(default_factory=dict)
     final_text: str | None = None
     reasoning: str | None = None    # the model's own trace, for the log
+    dropped_calls: int = 0          # extra tool calls the model emitted beyond one
 
 
 @dataclass

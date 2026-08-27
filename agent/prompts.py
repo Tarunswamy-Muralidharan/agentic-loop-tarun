@@ -41,7 +41,9 @@ def reason_user(percept: Any, target: float) -> str:
         scores = ("none yet — the current table has NOT been validated"
                   if percept.table else "none — no table exists")
     else:
-        relation = "meets target" if percept.weighted_total >= target else "below target"
+        relation = ("meets target — a finish_task(success) claim would be "
+                    "accepted right now"
+                    if percept.weighted_total >= target else "below target")
         scores = (", ".join(f"{k}={v:.1f}/5" for k, v in percept.last_scores.items())
                   + f"  (weighted total {percept.weighted_total:.2f}/5, "
                     f"target {target} — {relation})")
