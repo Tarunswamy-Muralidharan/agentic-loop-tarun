@@ -82,12 +82,18 @@ def main() -> int:
     print(f"final score  : {state.weighted_total}  (threshold {cfg['loop']['score_threshold']})")
     if state.last_scores:
         print("dimensions   : " + ", ".join(f"{k}={v}" for k, v in state.last_scores.items()))
+    if state.verdict:
+        print(f"agent verdict: {state.verdict}")
     print(f"tokens used  : {budget.total}")
     print(f"log file     : {logger.path}")
     print("=" * 62)
     print("\n--- source text ---\n" + state.source)
-    print("\n--- final table ---\n" + render_markdown_table(state.table))
-    return 0 if state.status in (Status.DONE, Status.PARTIAL) else 1
+    if state.status is Status.REFUSED:
+        print("\n--- no table: the agent judged this input not tabulatable ---")
+    else:
+        print("\n--- final table ---\n" + render_markdown_table(state.table))
+    # REFUSED is a successful judgement, not an error.
+    return 0 if state.status in (Status.DONE, Status.PARTIAL, Status.REFUSED) else 1
 
 
 if __name__ == "__main__":

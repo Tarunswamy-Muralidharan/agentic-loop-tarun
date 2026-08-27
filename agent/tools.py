@@ -71,6 +71,35 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "finish_task",
+            "description": (
+                "End the run with your verdict. Use outcome 'success' when a "
+                "validated score meets the target (the harness verifies this "
+                "and will refuse the claim otherwise), or 'not_tabulatable' "
+                "when your judgement is that the input contains no extractable "
+                "facts — gibberish, empty text, a bare question, or pure "
+                "opinion. Always explain the verdict."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["success", "not_tabulatable"],
+                        "description": "Your verdict on how the run ends.",
+                    },
+                    "explanation": {
+                        "type": "string",
+                        "description": "One or two sentences justifying the verdict.",
+                    },
+                },
+                "required": ["outcome", "explanation"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "validate_table",
             "description": (
                 "Score the current table 0-5 on groundedness, coverage, "
@@ -208,7 +237,15 @@ def build_registry(llm: Any, source: str) -> dict[str, Callable[..., dict[str, A
                 "missed_facts": missed,
                 "table": table}
 
-    return {"extract_table": extract_table, "validate_table": validate_table}
+    def finish_task(outcome: str, explanation: str) -> dict[str, Any]:
+        """A decision tool: no side effects here. reflect() interprets the
+        verdict and the harness enforces the success invariant."""
+        if outcome not in ("success", "not_tabulatable"):
+            raise ValueError(f"unknown outcome {outcome!r}")
+        return {"outcome": outcome, "explanation": explanation}
+
+    return {"extract_table": extract_table, "validate_table": validate_table,
+            "finish_task": finish_task}
 
 
 def _valid_table(data: dict[str, Any]) -> bool:

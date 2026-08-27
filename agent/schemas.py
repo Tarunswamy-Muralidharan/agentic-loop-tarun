@@ -17,6 +17,7 @@ class Status(str, Enum):
     """Terminal status of a run. An explicit status beats returning None."""
 
     DONE = "DONE"          # validation threshold met
+    REFUSED = "REFUSED"    # the agent judged the input not tabulatable (its call)
     PARTIAL = "PARTIAL"    # max iterations / token budget hit; best table returned
     STUCK = "STUCK"        # identical reflections twice in a row
     FAILED = "FAILED"      # unrecoverable error (e.g. auth) after retries
@@ -36,7 +37,8 @@ class AgentState:
     missed_facts: list[str] = field(default_factory=list)
     best_table: dict[str, Any] | None = None
     best_total: float = -1.0
-    next_instruction: str = "No table yet. Extract a first table from the source."
+    next_instruction: str = "First iteration: nothing has happened yet."
+    verdict: str | None = None      # the agent's own explanation when it finishes
     history: list[dict[str, Any]] = field(default_factory=list)
     done: bool = False
     status: Status | None = None

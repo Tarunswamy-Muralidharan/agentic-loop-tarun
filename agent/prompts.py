@@ -11,31 +11,40 @@ from typing import Any
 # ---------------------------------------------------------------- reason ----
 
 REASON_SYSTEM = """\
-You are the decision-maker inside an agent that reformats messy text into a
-structured table. You do not build the table yourself — you decide the next
-action and call a tool to do it.
+You are an autonomous agent. Your goal: turn the source text into a
+structured table you can PROVE is faithful — or decide, on your own
+judgement, that the task cannot be done and say why.
 
-Rules:
-- If no table exists yet, call extract_table first.
-- After ANY extraction, you must call validate_table before anything else —
-  an unvalidated table has no score.
-- If validation reports defects or missed facts, call extract_table again and
-  pass the feedback so the extraction can repair them.
-- If the latest validated score meets or beats the target, do NOT call a
-  tool. Reply in plain text starting with the word FINISH and a one-line reason.
-- Call exactly one tool per turn.
+There is no fixed sequence. Every turn, YOU decide the single next action
+by calling exactly one tool. What you know about your world:
+
+- extract_table drafts a table from the source. Pass `feedback` to target
+  specific problems in a previous attempt.
+- validate_table measures the current table against the source. An
+  unvalidated table has no evidentiary weight — you cannot know it is good.
+- finish_task ends the run. outcome "success" is only accepted by the
+  harness when a validated score meets the target; outcome "not_tabulatable"
+  is YOUR judgement that the input has no extractable facts (gibberish,
+  empty, a bare question, pure opinion with nothing to tabulate).
+
+Judge the input first. If there is nothing tabular in it, finish immediately
+with outcome not_tabulatable and a clear explanation — do not waste
+iterations extracting from noise. Spend iterations only where they can
+improve a provable result.
 """
 
 
 def reason_user(percept: Any, target: float) -> str:
-    """Build the user message for the reason step from the Percept."""
+    """Build the user message for the reason step. Facts only — what is true
+    right now. No instructions: the decision belongs to the model."""
     if percept.last_scores is None:
-        scores = "no validated score yet" + (
-            " (a table exists but validation is required)" if percept.table else
-            " (no table yet)")
+        scores = ("none yet — the current table has NOT been validated"
+                  if percept.table else "none — no table exists")
     else:
+        relation = "meets target" if percept.weighted_total >= target else "below target"
         scores = (", ".join(f"{k}={v:.1f}/5" for k, v in percept.last_scores.items())
-                  + f"  (weighted total {percept.weighted_total:.2f}/5, target {target})")
+                  + f"  (weighted total {percept.weighted_total:.2f}/5, "
+                    f"target {target} — {relation})")
     defects = "\n".join(f"- {d}" for d in percept.defects) or "(none reported)"
     missed = "\n".join(f"- {m}" for m in percept.missed_facts) or "(none reported)"
     memory = "\n".join(f"- {m}" for m in percept.memory_notes) or "(no relevant memory)"
@@ -57,13 +66,13 @@ Defects found by the validator:
 Facts the validator says were missed:
 {missed}
 
-Guidance carried over from the previous iteration:
+What happened last iteration:
 {percept.next_instruction}
 
-Lessons recalled from memory (avoid repeating what did not work):
+Lessons recalled from memory:
 {memory}
 
-Decide the single next action.
+Decide your single next action.
 """
 
 

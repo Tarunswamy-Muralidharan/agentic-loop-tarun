@@ -114,34 +114,58 @@ def act(decision: Decision, registry: dict[str, Any]) -> Observation:
 
 def reflect(state: AgentState, decision: Decision, obs: Observation,
             score_threshold: float) -> Reflection:
-    """Rule-based judgement. Deliberately NOT an LLM call: comparing numbers
-    and reading a defect list is cheaper, deterministic, and immune to the
-    model grading its own homework."""
+    """Bookkeeping + safety invariants — NOT the decision-maker.
+
+    reflect records what happened and reports facts back to the agent; the
+    choice of next action belongs to reason (the model). Exactly one hard
+    invariant lives here: a SUCCESS claim is only accepted when a validated
+    score meets the target. That is governance, not choreography — the model
+    proposes, the gate disposes."""
     before = state.weighted_total
 
     if not obs.ok:
         return Reflection(
             is_done=False, quality_score=before if before is not None else -1,
-            next_instruction=f"The last action failed ({obs.error}). "
-                             f"Choose a different action.",
+            next_instruction=f"Your last action failed: {obs.error}",
             summary=f"error:{obs.error}",
             memory_record={"iteration": state.iteration, "action": decision.tool_name,
                            "target": "-", "score_before": before, "score_after": before,
                            "lesson": f"failed: {obs.error}"},
         )
 
-    if decision.kind == "final":
-        text = str(obs.content or "")
-        done = text.upper().startswith("FINISH") and before is not None \
-               and before >= score_threshold
+    # ---- the agent decided to end the run -----------------------------------
+    if decision.tool_name == "finish_task" or decision.kind == "final":
+        if decision.kind == "final":            # legacy plain-text path
+            verdict = {"outcome": "success", "explanation": str(obs.content or "")}
+        else:
+            verdict = obs.content
+
+        if verdict["outcome"] == "not_tabulatable":
+            state.status = Status.REFUSED
+            state.verdict = verdict["explanation"]
+            return Reflection(
+                is_done=True, quality_score=-1,
+                next_instruction="",
+                summary=f"refused:{verdict['explanation'][:60]}",
+                memory_record={"iteration": state.iteration, "action": "refuse",
+                               "target": "-", "score_before": before,
+                               "score_after": before,
+                               "lesson": f"judged not tabulatable: "
+                                         f"{verdict['explanation'][:80]}"},
+            )
+
+        # outcome == success: the ONE invariant — no success without evidence.
+        met = before is not None and before >= score_threshold
+        if met:
+            state.verdict = verdict["explanation"]
         return Reflection(
-            is_done=done,
+            is_done=met,
             quality_score=before if before is not None else -1,
-            next_instruction="" if done else
-                "You said FINISH but there is no validated score at target — "
-                "extract or validate instead.",
-            summary=f"final:{text[:60]}",
-            memory_record=None if not done else
+            next_instruction="" if met else
+                "Fact: your success claim was rejected — there is no validated "
+                "score at target on the current table.",
+            summary=f"finish:{verdict['outcome']}:{'accepted' if met else 'rejected'}",
+            memory_record=None if not met else
                 {"iteration": state.iteration, "action": "finish", "target": "-",
                  "score_before": before, "score_after": before,
                  "lesson": "finished at target"},
@@ -150,13 +174,19 @@ def reflect(state: AgentState, decision: Decision, obs: Observation,
     result = obs.content
     if decision.tool_name == "extract_table":
         state.table = result["table"]
-        # A fresh extraction invalidates any previous score: force re-validation.
+        # A fresh extraction invalidates the previous measurement ENTIRELY —
+        # score, defects and missed facts all described a table that no longer
+        # exists. Leaving stale defects visible sends the model into a
+        # repair-forever loop where it never re-validates.
         state.last_scores, state.weighted_total = None, None
+        state.defects, state.missed_facts = [], []
         was_repair = bool(decision.tool_args.get("feedback"))
         return Reflection(
             is_done=False,
             quality_score=-1,
-            next_instruction="Table extracted — validate it to get a score.",
+            next_instruction=f"Fact: extraction produced a "
+                             f"{result['n_rows']}x{result['n_cols']} table. "
+                             f"It has not been validated.",
             summary=f"extracted:{result['n_rows']}x{result['n_cols']}"
                     f"{':repair' if was_repair else ''}",
             memory_record={"iteration": state.iteration, "action": "extract",
@@ -166,7 +196,7 @@ def reflect(state: AgentState, decision: Decision, obs: Observation,
                                      f"{result['n_cols']} cols, effect unknown until validation"},
         )
 
-    # validate_table: adopt the verdict; done if the threshold is met.
+    # validate_table: record the measurement; the agent decides what it means.
     after = result["weighted_total"]
     state.last_scores = result["scores"]
     state.weighted_total = after
@@ -174,15 +204,15 @@ def reflect(state: AgentState, decision: Decision, obs: Observation,
     state.missed_facts = result["missed_facts"]
     if after > state.best_total:
         state.best_total, state.best_table = after, state.table
-    met = after >= score_threshold
     weakest = min(result["scores"], key=result["scores"].get)
-    feedback_hint = "; ".join((result["defects"] + result["missed_facts"])[:4])
+    relation = "meets" if after >= score_threshold else "is below"
     return Reflection(
-        is_done=met,
+        is_done=False,
         quality_score=after,
-        next_instruction="Target met — reply FINISH." if met else
-            f"Re-extract with feedback to fix the weakest dimension "
-            f"({weakest}): {feedback_hint}",
+        next_instruction=f"Fact: validation scored {after}/5, which {relation} "
+                         f"the target {score_threshold}. Weakest dimension: {weakest}. "
+                         f"{len(result['defects'])} defect(s), "
+                         f"{len(result['missed_facts'])} missed fact(s).",
         summary=f"validated:{after}",
         memory_record={"iteration": state.iteration, "action": "validate", "target": weakest,
                        "score_before": before, "score_after": after,
@@ -249,20 +279,22 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
         state.next_instruction = reflection.next_instruction
 
         if reflection.is_done:
-            state.done, state.status = True, Status.DONE
+            state.done = True
+            if state.status is None:        # reflect may have set REFUSED already
+                state.status = Status.DONE
             break
 
-        # Stuck detection: identical reflections twice in a row -> STUCK.
-        # For this use case that means two validations with the same score —
-        # the repair in between achieved nothing, so more loops won't either.
+        # Stuck detection (the challenge's literal rule): if reflect returns
+        # identical output twice in a row, the loop is cycling — an identical
+        # validation means the repair achieved nothing; an identical extraction
+        # means the agent is spinning without measuring. Either way, break.
         fp = hashlib.sha256(reflection.summary.encode()).hexdigest()
-        if reflection.summary.startswith("validated:"):
-            recent_fingerprints.append(fp)
-            if (len(recent_fingerprints) >= loop_cfg["stuck_threshold"]
-                    and len(set(recent_fingerprints[-loop_cfg["stuck_threshold"]:])) == 1):
-                state.done, state.status = True, Status.STUCK
-                logger.event("stop", "STUCK: identical validation score twice in a row")
-                break
+        recent_fingerprints.append(fp)
+        if (len(recent_fingerprints) >= loop_cfg["stuck_threshold"]
+                and len(set(recent_fingerprints[-loop_cfg["stuck_threshold"]:])) == 1):
+            state.done, state.status = True, Status.STUCK
+            logger.event("stop", "STUCK: identical reflection twice in a row")
+            break
 
         if llm.budget.exceeded:
             state.done, state.status = True, Status.PARTIAL

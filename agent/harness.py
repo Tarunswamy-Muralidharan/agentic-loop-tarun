@@ -226,18 +226,23 @@ class FakeLLM:
             return {"content": json.dumps({"missed_facts": missed}),
                     "tool_calls": []}, usage
 
-        # reason call: script the decision sequence off the visible state
-        if "(no table yet)" in user:
+        # reason call: script agent-like decisions off the visible facts.
+        def call(name, args):
             return {"content": None, "tool_calls": [
-                {"id": "fake-1", "name": "extract_table",
-                 "arguments": json.dumps({"text": "(held by handler)"})}]}, usage
-        if "validation is required" in user:
-            return {"content": None, "tool_calls": [
-                {"id": "fake-2", "name": "validate_table",
-                 "arguments": json.dumps({"text": "(held by handler)"})}]}, usage
-        if "Target met" in user:
-            return {"content": "FINISH — validated score at target (offline)."}, usage
-        return {"content": None, "tool_calls": [
-            {"id": "fake-3", "name": "extract_table",
-             "arguments": json.dumps({"text": "(held by handler)",
-                                      "feedback": "validator defects (offline)"})}]}, usage
+                {"id": "fake", "name": name, "arguments": json.dumps(args)}]}, usage
+
+        if "June" not in user:                       # gibberish input -> refuse early
+            return call("finish_task",
+                        {"outcome": "not_tabulatable",
+                         "explanation": "The source contains no recognizable facts "
+                                        "to tabulate (offline judgement)."})
+        if "meets target" in user:                   # validated at target -> claim done
+            return call("finish_task",
+                        {"outcome": "success",
+                         "explanation": "Validated score meets the target (offline)."})
+        if "no table exists" in user:
+            return call("extract_table", {"text": "(held by handler)"})
+        if "has NOT been validated" in user:
+            return call("validate_table", {"text": "(held by handler)"})
+        return call("extract_table", {"text": "(held by handler)",
+                                      "feedback": "validator defects (offline)"})
