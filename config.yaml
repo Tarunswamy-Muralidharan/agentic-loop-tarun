@@ -7,8 +7,8 @@ model:
   fallback_models:                 # tried in order if the primary errors
     - openai/gpt-oss-20b
     - qwen/qwen3.8-27b
-  temperature: 0.2                 # loop decisions: near-deterministic
-  revise_temperature: 0.7          # rewriting can be warmer
+  temperature: 0.2                 # agent decisions: near-deterministic
+  timeout_seconds: 60              # per-request client timeout
 
 loop:
   max_iterations: 10               # hard cap (Milestone 3 default)
@@ -17,6 +17,9 @@ loop:
   patience_after_target: 4         # once the target is met: iterations allowed with no
                                    # improvement before the harness ends the run (DONE,
                                    # best table) — bounds perfectionism loops
+  max_model_errors: 2              # consecutive unrecoverable model failures -> FAILED
+  extract_streak_warn: 2           # consecutive unvalidated extractions before the
+                                   # harness posts a notice into the conversation
 
 retry:
   max_attempts: 4

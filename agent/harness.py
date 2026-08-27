@@ -126,19 +126,20 @@ class GroqLLM:
         self.client = OpenAI(
             api_key=os.environ["GROQ_API_KEY"],
             base_url=model_cfg["base_url"],
-            timeout=60.0,
+            timeout=float(model_cfg.get("timeout_seconds", 60)),
         )
         self.models = [model_cfg["name"], *model_cfg.get("fallback_models", [])]
         self.temperature = model_cfg.get("temperature", 0.2)
-        self.revise_temperature = model_cfg.get("revise_temperature", 0.7)
         self.retry_cfg = cfg["retry"]
         self.budget = budget
         self.logger = logger
 
-    def chat(self, messages, tools=None, response_format=None, temperature=0.2):
+    def chat(self, messages, tools=None, response_format=None, temperature=None):
         """One chat completion. Retries transient errors per model, then falls
-        back to the next model in the chain (retired model, hard 4xx/5xx)."""
-        temp = self.revise_temperature if temperature is None else temperature
+        back to the next model in the chain (retired model, hard 4xx/5xx).
+        temperature=None means the configured default; callers that need a
+        specific setting (the deterministic judge) pass it explicitly."""
+        temp = self.temperature if temperature is None else temperature
         last_exc: Exception | None = None
 
         for model in self.models:
@@ -206,7 +207,7 @@ class FakeLLM:
         self.coverage_round = 0
         self.budget: TokenBudget | None = None   # main() attaches the shared budget
 
-    def chat(self, messages, tools=None, response_format=None, temperature=0.2):
+    def chat(self, messages, tools=None, response_format=None, temperature=None):
         usage = {"total_tokens": 100}
         if self.budget:
             self.budget.add(usage)

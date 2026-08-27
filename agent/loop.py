@@ -71,7 +71,7 @@ def perceive(state: AgentState, memory, recall_k: int, target: float) -> list[di
 def reason(messages: list[dict], llm, tool_schemas: list[dict]) -> Decision:
     """One model turn over the whole conversation. The model's choice comes
     back verbatim; malformed arguments become a Decision the loop can see."""
-    msg, _usage = llm.chat(messages=messages, tools=tool_schemas, temperature=0.2)
+    msg, _usage = llm.chat(messages=messages, tools=tool_schemas)  # configured temp
     if msg["tool_calls"]:
         call = msg["tool_calls"][0]                    # exactly one tool per turn
         dropped = len(msg["tool_calls"]) - 1
@@ -228,6 +228,8 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
         cfg: dict[str, Any]) -> AgentState:
     loop_cfg = cfg["loop"]
     threshold = loop_cfg["score_threshold"]
+    max_model_errors = loop_cfg.get("max_model_errors", MAX_MODEL_ERRORS)
+    streak_warn = loop_cfg.get("extract_streak_warn", EXTRACT_STREAK_WARN)
     state = AgentState(goal=goal, source=source)
     recent: list[str] = []
     consecutive_errors = 0
@@ -249,7 +251,7 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
         except Exception as exc:   # noqa: BLE001 — post-retry model failure
             consecutive_errors += 1
             logger.step(state.iteration, "reason", "-", "-", t0, error=str(exc))
-            if consecutive_errors > MAX_MODEL_ERRORS:
+            if consecutive_errors > max_model_errors:
                 state.status, state.done = Status.FAILED, True
                 logger.event("stop", f"FAILED: model unrecoverable ({exc})")
                 break
@@ -313,7 +315,7 @@ def run(goal: str, source: str, llm, registry, tool_schemas, memory, logger,
         # Extraction-streak notice: redrafting repeatedly without measuring.
         if reflection.summary.startswith("extracted"):
             extract_streak += 1
-            if extract_streak > EXTRACT_STREAK_WARN:
+            if extract_streak > streak_warn:
                 state.messages.append({"role": "user", "content":
                     f"[harness] You have extracted {extract_streak} times in a row "
                     f"without validating — none of these tables has evidentiary "
